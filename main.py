@@ -26,9 +26,9 @@ start_learning_rate = 0.0005
 # The final learning rate for optimizer
 end_learning_rate = 0.0002
 # The mode for the program, "compress", "decompress", "both"
-mode = 'both'
+mode = 'decompress'
 
-path_to_file = "data/enwik5"
+path_to_file = "data/text_file"
 path_to_compressed = path_to_file + "_compressed.dat"
 path_to_decompressed = path_to_file + "_decompressed.dat"
 
@@ -279,7 +279,7 @@ def compession():
     # Creating a mapping from unique characters to indexes.
     char2idx = {u: i for i, u in enumerate(vocab)}
     for idx, c in enumerate(text):
-        int_list.append(char2idx[c])
+        int_list.append(char2idx[c]) # Добавляю индекс уникального символа из vocab
 
     # Round up to a multiple of 8 to improve performance.
     vocab_size = math.ceil(vocab_size/8) * 8

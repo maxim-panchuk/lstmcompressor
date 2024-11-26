@@ -1,2 +1,8 @@
-venv
+.venv
 __pycache__
+.idea
+data/.ipynb_checkpoints
+.ipynb_checkpoints
+pyvenv.cfg
+data/text_file
+data/text_file.dat
