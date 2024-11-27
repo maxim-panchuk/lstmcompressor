@@ -14,7 +14,7 @@ from ArithmeticCoder import ArithmeticEncoder, ArithmeticDecoder, BitOutputStrea
 from tokenizers import Tokenizer, models, trainers, pre_tokenizers
 
 os.environ['TF_DETERMINISTIC_OPS'] = '1'
-
+# weight of lstm predictions
 # The batch size for training
 batch_size = 128
 # The sequence length for training
@@ -30,7 +30,7 @@ start_learning_rate = 0.005
 # The final learning rate for optimizer
 end_learning_rate = 0.0002
 # The mode for the program, "compress", "decompress", "both"
-mode = 'compress'
+mode = 'both'
 
 path_to_tokenizer = "data/bpe_tokenizer.json"
 path_to_file = "data/enwik5"
@@ -169,15 +169,30 @@ def train(pos, seq_input, length, vocab_size, coder, model, optimizer, compress,
         mask = []
         # Go over each batch to run the arithmetic coding and prepare the next
         # input.
+
         for i in range(batch_size):
-            # The "10000000" is used to convert floats into large integers (since
-            # the arithmetic coder works on integers).
-            freq = np.cumsum(p[i] * 10000000 + 1)
+            empirical_freq = np.zeros(vocab_size)
+            curr_batch_el_pos = pos + i * split
+            if curr_batch_el_pos < length:
+                while curr_batch_el_pos >= i * split:
+                    empirical_freq[data[curr_batch_el_pos]] += 1
+                    curr_batch_el_pos -= 1
+
+            empirical_freq /= empirical_freq.sum()
+
+            p_s = pos / split
+            if p_s < 0.1:
+                alpha = 0.6
+            else:
+                alpha = 0.9
+
+            final_prob = alpha * p[i] + (1 - alpha) * empirical_freq
+            freq = np.cumsum(final_prob * 10000000 + 1)
             index = pos + 1 + i * split
             symbol = get_symbol(index, length, freq, coder, compress, data) # encode curr symbol and get next
-            symbols.append(symbol) ## add next symbol for curr batch
+            symbols.append(symbol) ## add next symbol for curr batch el
             if index < length:
-                prob = p[i][symbol] # probability of next symbol in curr batch
+                prob = p[i][symbol] # probability of next symbol in curr batch el
                 if prob <= 0:
                     # Set a small value to avoid error with log2.
                     prob = 0.000001
@@ -273,21 +288,7 @@ def process(compress, length, vocab_size, coder, data):
         coder.finish()
     print(template.format(100, -cross_entropy / length, time.time() - start))
 
-def train_bpe_tokenizer(text_path, vocab_size=5000):
-    with open(text_path, 'r', encoding='utf-8') as f:
-        texts = f.readlines()
-
-    tokenizer = Tokenizer(models.BPE())
-    tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
-        pre_tokenizers.ByteLevel(add_prefix_space=False)
-    ])
-
-    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<unk>", "<pad>", "\n", "\t", " "])
-    tokenizer.train_from_iterator(texts, trainer)
-    tokenizer.save(path_to_tokenizer)
-
-
-def train_wordpiece_tokenizer(text_path, vocab_size=5000):
+def train_wordpiece_tokenizer(text_path, vocab_size=8000):
     with open(text_path, 'r', encoding='utf-8') as f:
         texts = f.readlines()
 
@@ -361,23 +362,8 @@ def decompression():
         decoded_text = custom_decode(output)
         out.write(decoded_text.encode("utf-8"))
 
-# def encode_and_decode():
-#     tokenizer = Tokenizer.from_file(path_to_tokenizer)
-#
-#     with open(path_to_file, "r", encoding="utf-8") as f:
-#         text = f.read()
-#
-#     tokenized_text = tokenizer.encode(text).ids
-#
-#     print(f"tokenized_text: {tokenized_text}")
-#
-#     decoded_text = custom_decode(tokenized_text)
-#
-#     with open(path_to_decompressed, "wb") as out:
-#         out.write(decoded_text.encode("utf-8"))
 
 def main():
-    # encode_and_decode()
     start = time.time()
     if mode == 'compress' or mode == 'both':
         compression()
