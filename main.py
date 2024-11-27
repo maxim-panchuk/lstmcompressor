@@ -1,3 +1,5 @@
+from sys import byteorder
+
 import tensorflow as tf
 import numpy as np
 import random
@@ -6,8 +8,10 @@ import math
 import contextlib
 import os
 import hashlib
+import unicodedata
 
 from ArithmeticCoder import ArithmeticEncoder, ArithmeticDecoder, BitOutputStream, BitInputStream
+from tokenizers import Tokenizer, models, trainers, pre_tokenizers
 
 os.environ['TF_DETERMINISTIC_OPS'] = '1'
 
@@ -22,16 +26,16 @@ num_layers = 4
 # The size of the embedding layer
 embedding_size = 1024
 # The initial learning rate for optimizer
-start_learning_rate = 0.0005
+start_learning_rate = 0.001
 # The final learning rate for optimizer
 end_learning_rate = 0.0002
 # The mode for the program, "compress", "decompress", "both"
-mode = 'decompress'
+mode = 'both'
 
-path_to_file = "data/text_file"
+path_to_tokenizer = "data/bpe_tokenizer.json"
+path_to_file = "data/enwik5"
 path_to_compressed = path_to_file + "_compressed.dat"
 path_to_decompressed = path_to_file + "_decompressed.dat"
-
 
 def build_model(vocab_size: int) -> tf.keras.Model:
     """Builds the model architecture.
@@ -269,70 +273,114 @@ def process(compress, length, vocab_size, coder, data):
         coder.finish()
     print(template.format(100, -cross_entropy / length, time.time() - start))
 
+def train_bpe_tokenizer(text_path, vocab_size=5000):
+    with open(text_path, 'r', encoding='utf-8') as f:
+        texts = f.readlines()
 
-def compession():
-    # int_list will contain the characters of the file.
-    int_list = []
-    text = open(path_to_file, 'rb').read()
-    vocab = sorted(set(text))
-    vocab_size = len(vocab)
-    # Creating a mapping from unique characters to indexes.
-    char2idx = {u: i for i, u in enumerate(vocab)}
-    for idx, c in enumerate(text):
-        int_list.append(char2idx[c]) # Добавляю индекс уникального символа из vocab
+    tokenizer = Tokenizer(models.BPE())
+    tokenizer.pre_tokenizer = pre_tokenizers.Sequence([
+        pre_tokenizers.ByteLevel(add_prefix_space=False)
+    ])
 
-    # Round up to a multiple of 8 to improve performance.
-    vocab_size = math.ceil(vocab_size/8) * 8
-    file_len = len(int_list)
-    print('Length of file: {} symbols'.format(file_len))
-    print('Vocabulary size: {}'.format(vocab_size))
+    trainer = trainers.BpeTrainer(vocab_size=vocab_size, special_tokens=["<unk>", "<pad>", "\n", "\t", " "])
+    tokenizer.train_from_iterator(texts, trainer)
+    tokenizer.save(path_to_tokenizer)
+
+
+def train_wordpiece_tokenizer(text_path, vocab_size=5000):
+    with open(text_path, 'r', encoding='utf-8') as f:
+        texts = f.readlines()
+
+    tokenizer = Tokenizer(models.WordPiece(unk_token="<unk>"))
+    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
+    trainer = trainers.WordPieceTrainer(
+        vocab_size=vocab_size,
+        special_tokens=["<unk>", "<pad>", "[CLS]", "[SEP]", "[MASK]", "\n", "\t", " "]
+    )
+    tokenizer.train_from_iterator(texts, trainer)
+    tokenizer.save(path_to_tokenizer)
+
+def compression():
+    train_wordpiece_tokenizer(path_to_file)
+    tokenizer = Tokenizer.from_file(path_to_tokenizer)
+
+    with open(path_to_file, "r", encoding="utf-8") as f:
+        text = f.read()
+
+    tokenized_text = tokenizer.encode(text).ids
+
+    vocab = tokenizer.get_vocab()
+    vocab_size = math.ceil(len(vocab) / 8) * 8
+
+    length = len(tokenized_text)
+
+    print('Length of file: {} tokens'.format(length))
+    print('Vocabulary size (compact): {}'.format(vocab_size))
 
     with open(path_to_compressed, "wb") as out, contextlib.closing(BitOutputStream(out)) as bitout:
-        length = len(int_list)
-        # Write the original file length to the compressed file header.
-        out.write(length.to_bytes(5, byteorder='big', signed=False))
-        # Write 256 bits to the compressed file header to keep track of the vocabulary.
-        for i in range(256):
-            if i in char2idx:
-                bitout.write(1)
-            else:
-                bitout.write(0)
+        out.write(length.to_bytes(5, byteorder="big", signed=False))
         enc = ArithmeticEncoder(32, bitout)
-        process(True, length, vocab_size, enc, int_list)
+        process(True, length, vocab_size, enc, tokenized_text)
 
+def custom_decode(tokenized_text):
+    tokenizer = Tokenizer.from_file(path_to_tokenizer)
+    vocab = tokenizer.get_vocab()
+
+    idx2token = {v: k for k, v in vocab.items()}
+    tokens = [idx2token[idx] for idx in tokenized_text]
+
+    decoded_text = ""
+
+    for token in tokens:
+        if token in {"##", "###"}:
+            decoded_text += token
+            continue
+        if token.startswith("##"):
+            decoded_text += token[2:]
+        else:
+            decoded_text += token
+
+    return decoded_text
 
 def decompression():
     with open(path_to_compressed, "rb") as inp, open(path_to_decompressed, "wb") as out:
-        # Read the original file size from the header.
         length = int.from_bytes(inp.read()[:5], byteorder='big')
         inp.seek(5)
-        # Create a list to store the file characters.
+
         output = [0] * length
         bitin = BitInputStream(inp)
 
-        # Get the vocabulary from the file header.
-        vocab = []
-        for i in range(256):
-            if bitin.read():
-                vocab.append(i)
-        vocab_size = len(vocab)
-        # Round up to a multiple of 8 to improve performance.
-        vocab_size = math.ceil(vocab_size/8) * 8
+        tokenizer = Tokenizer.from_file(path_to_tokenizer)
+
+        vocab = tokenizer.get_vocab()
+        vocab_size = math.ceil(len(vocab) / 8) * 8
+
         dec = ArithmeticDecoder(32, bitin)
         process(False, length, vocab_size, dec, output)
-        # The decompressed data is stored in the "output" list. We can now write the
-        # data to file (based on the type of preprocessing used).
 
-        # Convert indexes back to the original characters.
-        idx2char = np.array(vocab)
-        for i in range(length):
-            out.write(bytes((idx2char[output[i]],)))
+        decoded_text = custom_decode(output)
+        out.write(decoded_text.encode("utf-8"))
 
+# def encode_and_decode():
+#     tokenizer = Tokenizer.from_file(path_to_tokenizer)
+#
+#     with open(path_to_file, "r", encoding="utf-8") as f:
+#         text = f.read()
+#
+#     tokenized_text = tokenizer.encode(text).ids
+#
+#     print(f"tokenized_text: {tokenized_text}")
+#
+#     decoded_text = custom_decode(tokenized_text)
+#
+#     with open(path_to_decompressed, "wb") as out:
+#         out.write(decoded_text.encode("utf-8"))
 
 def main():
+    # encode_and_decode()
     start = time.time()
     if mode == 'compress' or mode == 'both':
-        compession()
+        compression()
         print(f"Original size: {os.path.getsize(path_to_file)} bytes")
         print(f"Compressed size: {os.path.getsize(path_to_compressed)} bytes")
         print("Compression ratio:", os.path.getsize(path_to_file)/os.path.getsize(path_to_compressed))
