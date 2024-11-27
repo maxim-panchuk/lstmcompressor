@@ -16,21 +16,21 @@ from tokenizers import Tokenizer, models, trainers, pre_tokenizers
 os.environ['TF_DETERMINISTIC_OPS'] = '1'
 
 # The batch size for training
-batch_size = 256
+batch_size = 128
 # The sequence length for training
-seq_length = 15
+seq_length = 64
 # The number of units in each LSTM layer
-rnn_units = 400
+rnn_units = 512
 # The number of LSTM layers
-num_layers = 4
+num_layers = 3
 # The size of the embedding layer
-embedding_size = 1024
+embedding_size = 512
 # The initial learning rate for optimizer
-start_learning_rate = 0.001
+start_learning_rate = 0.005
 # The final learning rate for optimizer
 end_learning_rate = 0.0002
 # The mode for the program, "compress", "decompress", "both"
-mode = 'both'
+mode = 'compress'
 
 path_to_tokenizer = "data/bpe_tokenizer.json"
 path_to_file = "data/enwik5"
