@@ -18,7 +18,7 @@ os.environ['TF_DETERMINISTIC_OPS'] = '1'
 # The batch size for training
 batch_size = 128
 # The sequence length for training
-seq_length = 64
+seq_length = 32
 # The number of units in each LSTM layer
 rnn_units = 512
 # The number of LSTM layers
@@ -174,10 +174,10 @@ def train(pos, seq_input, length, vocab_size, coder, model, optimizer, compress,
             # the arithmetic coder works on integers).
             freq = np.cumsum(p[i] * 10000000 + 1)
             index = pos + 1 + i * split
-            symbol = get_symbol(index, length, freq, coder, compress, data)
-            symbols.append(symbol)
+            symbol = get_symbol(index, length, freq, coder, compress, data) # encode curr symbol and get next
+            symbols.append(symbol) ## add next symbol for curr batch
             if index < length:
-                prob = p[i][symbol]
+                prob = p[i][symbol] # probability of next symbol in curr batch
                 if prob <= 0:
                     # Set a small value to avoid error with log2.
                     prob = 0.000001

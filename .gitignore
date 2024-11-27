@@ -6,3 +6,4 @@ data/.ipynb_checkpoints
 pyvenv.cfg
 data/text_file
 data/text_file.dat
+data/enwik5_compressed.dat
