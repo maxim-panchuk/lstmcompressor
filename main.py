@@ -1,3 +1,4 @@
+import json
 from sys import byteorder
 
 import tensorflow as tf
@@ -32,7 +33,8 @@ end_learning_rate = 0.0002
 # The mode for the program, "compress", "decompress", "both"
 mode = 'both'
 
-path_to_tokenizer = "data/bpe_tokenizer.json"
+path_to_tokenizer_encoder = "data/bpe_tokenizer_encoder.json"
+path_to_tokenizer_decoder = "data/bpe_tokenizer_decoder.json"
 path_to_file = "data/enwik5"
 path_to_compressed = path_to_file + "_compressed.dat"
 path_to_decompressed = path_to_file + "_decompressed.dat"
@@ -288,10 +290,7 @@ def process(compress, length, vocab_size, coder, data):
         coder.finish()
     print(template.format(100, -cross_entropy / length, time.time() - start))
 
-def train_wordpiece_tokenizer(text_path, vocab_size=8000):
-    with open(text_path, 'r', encoding='utf-8') as f:
-        texts = f.readlines()
-
+def train_tokenizer(texts, path_to_tokenizer, vocab_size=8000):
     tokenizer = Tokenizer(models.WordPiece(unk_token="<unk>"))
     tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
     trainer = trainers.WordPieceTrainer(
@@ -301,30 +300,83 @@ def train_wordpiece_tokenizer(text_path, vocab_size=8000):
     tokenizer.train_from_iterator(texts, trainer)
     tokenizer.save(path_to_tokenizer)
 
-def compression():
-    train_wordpiece_tokenizer(path_to_file)
-    tokenizer = Tokenizer.from_file(path_to_tokenizer)
+def split_text(text_path, total_parts=4):
+    with open(text_path, 'r', encoding='utf-8') as f:
+        texts = f.readlines()
 
-    with open(path_to_file, "r", encoding="utf-8") as f:
-        text = f.read()
 
-    tokenized_text = tokenizer.encode(text).ids
+    total_lines = len(texts)
+    lines_per_part = total_lines // total_parts
 
-    vocab = tokenizer.get_vocab()
-    vocab_size = math.ceil(len(vocab) / 8) * 8
+    parts = []
+    for i in range(total_parts):
+        start = i * lines_per_part
+        end = start + lines_per_part
+        parts.append(texts[start:end])
 
-    length = len(tokenized_text)
+    return parts
 
-    print('Length of file: {} tokens'.format(length))
-    print('Vocabulary size (compact): {}'.format(vocab_size))
+def compress_in_chars(part):
+    int_list =[]
+    str = ''.join(part)
+    text = [ord(c) for c in str]
+
+    vocab = sorted(set(text))
+    vocab_size = len(vocab)
+
+    char2idx = {u: i for i, u in enumerate(vocab)}
+    for idx, c in enumerate(text):
+        int_list.append(char2idx[c])
+
+    vocab_size = math.ceil(vocab_size / 8) * 8
+    first_part_len = len(int_list)
+    print('Length of first part: {} symbols'.format(first_part_len))
+    print('Vocabulary size: {}'.format(vocab_size))
 
     with open(path_to_compressed, "wb") as out, contextlib.closing(BitOutputStream(out)) as bitout:
-        out.write(length.to_bytes(5, byteorder="big", signed=False))
+        length = len(int_list)
+        # Write the original file length to the compressed file header.
+        out.write(length.to_bytes(5, byteorder='big', signed=False))
+        # Write 256 bits to the compressed file header to keep track of the vocabulary.
+        for i in range(256):
+            if i in char2idx:
+                bitout.write(1)
+            else:
+                bitout.write(0)
         enc = ArithmeticEncoder(32, bitout)
-        process(True, length, vocab_size, enc, tokenized_text)
+        process(True, length, vocab_size, enc, int_list)
+
+def decompress_in_chars():
+    with open(path_to_compressed, "rb") as inp, open(path_to_decompressed, "wb") as out:
+        # Read the original file size from the header.
+        length = int.from_bytes(inp.read()[:5], byteorder='big')
+        inp.seek(5)
+        # Create a list to store the file characters.
+        output = [0] * length
+        bitin = BitInputStream(inp)
+
+        # Get the vocabulary from the file header.
+        vocab = []
+        for i in range(256):
+            if bitin.read():
+                vocab.append(i)
+        vocab_size = len(vocab)
+        # Round up to a multiple of 8 to improve performance.
+        vocab_size = math.ceil(vocab_size/8) * 8
+        dec = ArithmeticDecoder(32, bitin)
+        process(False, length, vocab_size, dec, output)
+        # The decompressed data is stored in the "output" list. We can now write the
+        # data to file (based on the type of preprocessing used).
+
+        # Convert indexes back to the original characters.
+        idx2char = np.array(vocab)
+        for i in range(length):
+            out.write(bytes((idx2char[output[i]],)))
+
+
 
 def custom_decode(tokenized_text):
-    tokenizer = Tokenizer.from_file(path_to_tokenizer)
+    tokenizer = Tokenizer.from_file(path_to_tokenizer_encoder)
     vocab = tokenizer.get_vocab()
 
     idx2token = {v: k for k, v in vocab.items()}
@@ -340,10 +392,9 @@ def custom_decode(tokenized_text):
             decoded_text += token[2:]
         else:
             decoded_text += token
-
     return decoded_text
 
-def decompression():
+def decompress_in_tokens():
     with open(path_to_compressed, "rb") as inp, open(path_to_decompressed, "wb") as out:
         length = int.from_bytes(inp.read()[:5], byteorder='big')
         inp.seek(5)
@@ -351,7 +402,7 @@ def decompression():
         output = [0] * length
         bitin = BitInputStream(inp)
 
-        tokenizer = Tokenizer.from_file(path_to_tokenizer)
+        tokenizer = Tokenizer.from_file(path_to_tokenizer_encoder)
 
         vocab = tokenizer.get_vocab()
         vocab_size = math.ceil(len(vocab) / 8) * 8
@@ -362,20 +413,84 @@ def decompression():
         decoded_text = custom_decode(output)
         out.write(decoded_text.encode("utf-8"))
 
+def compress_in_tokens(part):
+    str = ''.join(part)
+    tokenizer = Tokenizer.from_file(path_to_tokenizer_encoder)
+    tokenized_text = tokenizer.encode(str).ids
+
+    vocab = tokenizer.get_vocab()
+    vocab_size = math.ceil(len(vocab) / 8) * 8
+    length = len(tokenized_text)
+
+    with open(path_to_compressed, "wb") as out, contextlib.closing(BitOutputStream(out)) as bitout:
+        out.write(length.to_bytes(5, byteorder="big", signed=False))
+        enc = ArithmeticEncoder(32, bitout)
+        process(True, length, vocab_size, enc, tokenized_text)
+
+
+def start_coding_decoding_iterative():
+    parts = split_text(path_to_file, 10)
+    compress_in_chars(parts[0])
+    decompress_in_chars()
+
+    encoder_text = []
+    encoder_text.extend(parts[0])
+
+    decoder_text = []
+
+    with open(path_to_decompressed, 'r', encoding='utf-8') as f:
+        text = f.readlines()
+
+    decoder_text.extend(text)
+
+    train_tokenizer(encoder_text, path_to_tokenizer_encoder)
+    train_tokenizer(decoder_text, path_to_tokenizer_decoder)
+
+
+    total_compress_file_bytes = os.path.getsize(path_to_compressed)
+
+    parts = parts[1:]
+    for part in parts:
+        compress_in_tokens(part)
+        decompress_in_tokens()
+
+        encoder_text.extend(part)
+
+        with open(path_to_decompressed, 'r', encoding='utf-8') as f:
+            text = f.readlines()
+
+        decoder_text.extend(text)
+
+        train_tokenizer(encoder_text, path_to_tokenizer_encoder)
+        train_tokenizer(decoder_text, path_to_tokenizer_decoder)
+
+        total_compress_file_bytes += os.path.getsize(path_to_compressed)
+
+
+    with open(path_to_decompressed, 'w', encoding='utf-8') as f:
+        f.writelines(decoder_text)
+
+    print(f"compressed bytes: {total_compress_file_bytes}")
 
 def main():
     start = time.time()
-    if mode == 'compress' or mode == 'both':
-        compression()
-        print(f"Original size: {os.path.getsize(path_to_file)} bytes")
-        print(f"Compressed size: {os.path.getsize(path_to_compressed)} bytes")
-        print("Compression ratio:", os.path.getsize(path_to_file)/os.path.getsize(path_to_compressed))
-    if mode == 'decompress' or mode == 'both':
-        decompression()
-        hash_dec = hashlib.md5(open(path_to_decompressed, 'rb').read()).hexdigest()
-        hash_orig = hashlib.md5(open(path_to_file, 'rb').read()).hexdigest()
-        assert hash_dec == hash_orig
+    start_coding_decoding_iterative()
     print("Time spent: ", time.time() - start)
+    #
+    #
+    #
+    # start = time.time()
+    # if mode == 'compress' or mode == 'both':
+    #     compression()
+    #     print(f"Original size: {os.path.getsize(path_to_file)} bytes")
+    #     print(f"Compressed size: {os.path.getsize(path_to_compressed)} bytes")
+    #     print("Compression ratio:", os.path.getsize(path_to_file)/os.path.getsize(path_to_compressed))
+    # if mode == 'decompress' or mode == 'both':
+    #     decompression()
+    #     hash_dec = hashlib.md5(open(path_to_decompressed, 'rb').read()).hexdigest()
+    #     hash_orig = hashlib.md5(open(path_to_file, 'rb').read()).hexdigest()
+    #     assert hash_dec == hash_orig
+    # print("Time spent: ", time.time() - start)
 
 
 if __name__ == '__main__':
